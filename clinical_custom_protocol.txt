@@ -1,0 +1,22 @@
+=========================================================
+MEDITRIAGE CLINICAL PROTOCOL & SPECIALTY ROUTING DIRECTIVE
+Document ID: MTP-2026-REV4
+Effective Date: September 2026
+=========================================================
+
+1. ORTHOPEDIC SPECIALTY ROUTING:
+- If a patient reports joint clicking, locking, or mechanical instability (e.g., knee or shoulder clicking) combined with a self-reported pain level of 7 or higher, the agent must categorize the case under "Orthopedic Specialist Queue" and flag for expedited outpatient imaging (MRI).
+
+2. CARDIAC EMERGENCY PROTOCOL (RED ALERT):
+- Any mention of chest tightness, pressure, substernal burning, or pain radiating to the left arm or jaw must immediately override standard routing. 
+- Regardless of the user's numeric pain rating, the agent must instantly trigger the `escalate_to_human` tool and transfer the call to the On-Call Cardiology ER team.
+
+3. NEUROLOGICAL SCREENING:
+- If a patient complains of a sudden severe headache ("thunderclap headache") accompanied by dizziness, vertigo, or visual disturbances, the agent must classify the case as "Neurological Priority" and recommend immediate emergency department evaluation.
+
+4. PEDIATRIC & GENERAL FEVER GUIDELINES:
+- For patients reporting high fever (>103°F or 39.4°C) combined with lethargy or confusion, the agent must flag the record as urgent and advise immediate virtual or in-person physician consultation within 2 hours.
+
+5. CHRONIC PAIN MANAGEMENT:
+- For returning patients with chronic lower back or limb pain whose pain level has remained stable (±1 point from previous visit), route to Routine Outpatient Physical Therapy follow-up rather than emergency escalation.
+=========================================================

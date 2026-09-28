@@ -4,16 +4,18 @@ import sqlite3
 import pandas as pd
 import json
 import time
+from db import init_db
 
-# Page Configuration
+# Ensure all database tables (patients, documents, wearables) are initialized on startup
+init_db()
+
 st.set_page_config(
-    page_title="MediTriage | Clinical Command Center",
+    page_title="MediTriage | Enterprise Clinical Suite",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling & Emergency Pulse Effect
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -44,21 +46,33 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Database Helper Functions
 def load_data():
     try:
         conn = sqlite3.connect('meditriage.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='patients'")
-        if not cursor.fetchone():
-            conn.close()
-            return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated"])
-        
         df = pd.read_sql_query("SELECT * FROM patients", conn)
         conn.close()
         return df
     except Exception:
-        return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated"])
+        return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated", "icd10_code", "safety_status", "transcript"])
+
+def save_uploaded_document(uploaded_file):
+    content = uploaded_file.read().decode("utf-8", errors="ignore")
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO documents (filename, content) VALUES (?, ?)", (uploaded_file.name, content))
+    conn.commit()
+    conn.close()
+
+def get_uploaded_documents():
+    try:
+        conn = sqlite3.connect('meditriage.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT filename, upload_date FROM documents")
+        docs = cursor.fetchall()
+        conn.close()
+        return docs
+    except Exception:
+        return []
 
 def update_case_status(patient_id, new_escalated_status):
     conn = sqlite3.connect('meditriage.db')
@@ -69,31 +83,36 @@ def update_case_status(patient_id, new_escalated_status):
 
 df = load_data()
 
-# Sidebar Telemetry & Controls
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/hospital-3.png", width=50)
     st.title("MediTriage Ops")
-    st.markdown("Enterprise AI Voice Gateway")
+    st.markdown("Enterprise AI Clinical Suite")
     st.divider()
     
+    st.subheader("📁 Agent Knowledge Base (RAG)")
+    uploaded_file = st.file_uploader("Upload Clinical Protocol (.txt/.md)", type=["txt", "md"])
+    if uploaded_file:
+        save_uploaded_document(uploaded_file)
+        st.success(f"Loaded '{uploaded_file.name}' into Agent RAG memory!")
+        
+    docs = get_uploaded_documents()
+    if docs:
+        st.markdown("**Active Uploaded Protocols:**")
+        for doc in docs:
+            st.text(f"• {doc[0]}")
+            
+    st.divider()
     st.subheader("⚡ System Telemetry")
     st.markdown("🟢 **Voice Gateway:** Connected")
-    st.markdown("🔒 **EHR Sync:** Secure (SQLite)")
-    st.markdown("🎙️ **Model:** AssemblyAI Agent (Ivy)")
+    st.markdown("🧠 **RAG Engine:** Active")
+    st.markdown("🤖 **Safety Supervisor:** Online")
     st.divider()
     
     auto_refresh = st.checkbox("🔄 Live Auto-Refresh (2s)", value=True)
-    st.divider()
-    
-    st.subheader("🔍 Filter Feed")
-    search_query = st.text_input("Search Patient ID", placeholder="e.g., 123456789")
-    filter_escalated = st.checkbox("⚠️ Show Escalated Only")
 
-# Main Header
-st.title("🏥 MediTriage Clinical Command & Control Center")
-st.markdown("Real-time voice agent oversight, automated triage processing, and clinical SOAP note generation.")
+st.title("🏥 MediTriage Enterprise Clinical Command Center")
+st.markdown("Autonomous voice intake, automated ICD-10 coding, multi-agent safety supervision, and RAG document intelligence.")
 
-# Emergency Banner Alert if active escalations exist
 active_emergencies = len(df[df['escalated'] == 1]) if not df.empty and 'escalated' in df else 0
 if active_emergencies > 0:
     st.markdown(f"""
@@ -104,7 +123,6 @@ if active_emergencies > 0:
 
 st.divider()
 
-# Metrics Row
 col1, col2, col3, col4 = st.columns(4)
 total_intakes = len(df)
 escalations = active_emergencies
@@ -122,18 +140,10 @@ with col4:
 
 st.divider()
 
-# Apply Filters
-if not df.empty:
-    if search_query:
-        df = df[df['id'].str.contains(search_query, case=False, na=False)]
-    if filter_escalated:
-        df = df[df['escalated'] == 1]
-
-# Layout: Interactive Queue & Analytics
 col_left, col_right = st.columns([2, 1])
 
 with col_left:
-    st.subheader("📋 Active Patient Triage Queue & SOAP Notes")
+    st.subheader("📋 Active Patient Triage Queue, ICD-10 Codes & Safety Audits")
     
     if df.empty:
         st.info("No patient records found. Run `python agent.py` to initiate a live voice triage call!")
@@ -145,25 +155,23 @@ with col_left:
                 symptoms_str = ", ".join(symptoms_list)
             except Exception:
                 symptoms_str = str(row['symptoms'])
-                symptoms_list = [symptoms_str]
                 
             pain = row['pain']
             escalated = row['escalated']
             urgent = row['urgent']
+            icd10 = row.get('icd10_code', 'N/A')
+            safety = row.get('safety_status', 'Pending Audit')
+            transcript = row.get('transcript', 'No transcript recorded.')
             
-            # Risk Scoring Logic & Specialty Routing
             if pain >= 8 or urgent == 1 or escalated == 1:
                 risk_badge = "🔴 CRITICAL RISK"
                 border_color = "#ff4b4b"
-                specialty = "Emergency / ER"
             elif pain >= 5:
                 risk_badge = "🟡 MODERATE RISK"
                 border_color = "#ffa726"
-                specialty = "Urgent Care"
             else:
                 risk_badge = "🟢 ROUTINE INTAKE"
                 border_color = "#2e7d32"
-                specialty = "General Practice"
                 
             with st.container():
                 st.markdown(f"""
@@ -172,22 +180,24 @@ with col_left:
                         <strong style="color: #f0f6fc; font-size: 1.1em;">Patient ID: {p_id}</strong>
                         <span style="background: {border_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">{risk_badge}</span>
                     </div>
-                    <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Primary Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>Suggested Specialty:</b> <i>{specialty}</i></p>
-                    <p style="color: #8b949e; margin: 0;"><b>Pain Level:</b> {pain}/10 &nbsp;|&nbsp; <b>Urgent Flag:</b> {'Yes' if urgent else 'No'}</p>
+                    <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>ICD-10 Code:</b> <code style="color: #58a6ff;">{icd10}</code></p>
+                    <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Safety Supervisor:</b> <span style="color: #3fb950;">{safety}</span></p>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Expandable SOAP Note & Action Drawer
-                with st.expander(f"📑 View Clinical SOAP Note & Actions (ID: {p_id})"):
+                with st.expander(f"📑 View Clinical SOAP Note, ICD-10 & Verbatim Audit (ID: {p_id})"):
                     st.markdown(f"""
-                    **AI-Generated Clinical Documentation (SOAP Format):**
-                    * **S (Subjective):** Patient reports primary complaint of *{symptoms_str}*. Self-reported pain scale is evaluated at **{pain}/10**. Caller verified identity via secure alphanumeric ID `{p_id}`.
-                    * **O (Objective):** Telephony intake processed via AssemblyAI Real-Time Voice Gateway. Automated speech recognition confidence nominal. Urgent care flag: `{'True' if urgent else 'False'}`.
-                    * **A (Assessment):** Patient presents with symptoms requiring evaluation by the **{specialty}** department. Risk stratification classified as `{risk_badge}`.
-                    * **P (Plan):** `{'Immediate nurse dispatch / emergency protocol engaged.' if escalated else 'Record synchronized to local EHR database. Standard outpatient follow-up recommended.'}`
+                    **AI-Generated Clinical Documentation (SOAP Format with ICD-10):**
+                    * **S (Subjective):** Patient reports primary complaint of *{symptoms_str}*. Self-reported pain scale is evaluated at **{pain}/10**. Caller verified via ID `{p_id}`.
+                    * **O (Objective):** AssemblyAI Real-Time Voice Gateway intake. ICD-10 Billing Code assigned: `{icd10}`. Urgent care flag: `{'True' if urgent else 'False'}`.
+                    * **A (Assessment):** Multi-Agent Safety Supervisor Status: `{safety}`. Risk stratification: `{risk_badge}`.
+                    * **P (Plan):** `{'Immediate nurse dispatch / emergency protocol engaged.' if escalated else 'Record synchronized to local EHR database. Outpatient follow-up.'}`
                     """)
                     
-                    # Interactive Action Buttons inside Expander
+                    st.divider()
+                    st.markdown("**🔍 Verbatim Audio Audit Transcript:**")
+                    st.code(transcript, language="text")
+                    
                     col_btn1, col_btn2 = st.columns(2)
                     with col_btn1:
                         if escalated == 0:
@@ -200,26 +210,23 @@ with col_left:
                                 st.rerun()
                 st.write("")
 
-        # Export CSV Button
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Export Triage Feed & SOAP Notes (CSV)",
+            label="📥 Export Enterprise EHR Feed (CSV)",
             data=csv,
-            file_name="meditriage_clinical_export.csv",
+            file_name="meditriage_enterprise_export.csv",
             mime="text/csv",
         )
 
 with col_right:
-    st.subheader("📊 Department Load & Analytics")
-    if not df.empty and 'pain' in df:
-        pain_counts = df['pain'].value_counts().reset_index()
-        pain_counts.columns = ['Pain Level', 'Count']
-        pain_counts = pain_counts.sort_values('Pain Level')
-        st.bar_chart(pain_counts.set_index('Pain Level'), color="#ff4b4b")
+    st.subheader("📊 Live ICD-10 Diagnostic Breakdown")
+    if not df.empty and 'icd10_code' in df:
+        code_counts = df['icd10_code'].value_counts().reset_index()
+        code_counts.columns = ['ICD-10 Code', 'Count']
+        st.dataframe(code_counts, use_container_width=True, hide_index=True)
     else:
         st.write("Awaiting live intake telemetry...")
 
-# Auto-refresh loop
 if auto_refresh:
     time.sleep(2)
     st.rerun()

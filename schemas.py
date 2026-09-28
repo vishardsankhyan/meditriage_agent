@@ -17,3 +17,6 @@ class EscalateToHuman(BaseModel):
 
 class LookupPatientHistory(BaseModel):
     patient_id: str = Field(description="The 9-digit patient ID to look up in historical EHR records.")
+
+class ConsultKnowledgeBase(BaseModel):
+    query: str = Field(description="Search query or symptom keyword to look up against uploaded clinic documents and protocols.")
