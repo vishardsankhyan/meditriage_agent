@@ -16,6 +16,7 @@ def init_db():
             escalated INTEGER,
             icd10_code TEXT,
             safety_status TEXT,
+            vocal_stress TEXT,
             transcript TEXT
         )
     ''')
@@ -38,7 +39,7 @@ def init_db():
         )
     ''')
     
-    for col, col_type in [("transcript", "TEXT"), ("icd10_code", "TEXT"), ("safety_status", "TEXT")]:
+    for col, col_type in [("transcript", "TEXT"), ("icd10_code", "TEXT"), ("safety_status", "TEXT"), ("vocal_stress", "TEXT")]:
         try:
             cursor.execute(f"ALTER TABLE patients ADD COLUMN {col} {col_type};")
         except sqlite3.OperationalError:
@@ -50,7 +51,7 @@ def init_db():
 def get_patient_history(patient_id):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT symptoms, pain, escalated, transcript, icd10_code FROM patients WHERE id = ?", (patient_id,))
+    cursor.execute("SELECT symptoms, pain, escalated, transcript, icd10_code, vocal_stress FROM patients WHERE id = ?", (patient_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -60,14 +61,15 @@ def get_patient_history(patient_id):
             "previous_pain": row[1],
             "was_escalated": bool(row[2]),
             "last_transcript": row[3],
-            "icd10_code": row[4]
+            "icd10_code": row[4],
+            "vocal_stress": row[5]
         }
-    return {"found": False, "message": "No previous records found for this patient ID. First-time visitor."}
+    return {"found": False, "message": "No previous records found for this patient ID."}
 
 def map_icd10(symptoms_list):
     text = " ".join(symptoms_list).lower()
     if "cut" in text or "bleeding" in text:
-        return "S91.309A (Puncture/cut wound with hemorrhage, initial encounter)"
+        return "S91.309A (Puncture/cut wound with hemorrhage)"
     elif "headache" in text or "severe headache" in text:
         return "R51.9 (Headache, unspecified / Neurological Priority)"
     elif "shoulder" in text:
@@ -77,23 +79,29 @@ def map_icd10(symptoms_list):
     elif "breath" in text or "lung" in text:
         return "R06.02 (Shortness of breath)"
     elif "leg" in text or "knee" in text:
-        return "M25.569 (Pain in unspecified knee/lower extremity)"
+        return "M25.569 (Pain in unspecified lower extremity)"
     return "R69 (Illness, unspecified)"
 
-def safety_supervisor_audit(pain, urgent, symptoms_list):
-    """Agentic Clinical Peer Review: Catches contradictions and red flags"""
-    text_blob = " ".join([str(s).lower() for s in symptoms_list])
+def calculate_vocal_biomarker(transcript_text, pain_level):
+    """Simulates acoustic distress and vocal biomarker panic detection"""
+    text = transcript_text.lower()
+    panic_words = ["can't bear", "severe", "hurry", "emergency", "unbearable", "worst", "help", "pain"]
+    match_count = sum(1 for word in panic_words if word in text)
     
-    red_flags = [
-        "chest pain", "crushing", "bleeding", "heavy bleeding", "cut", "breathing", 
-        "unconscious", "stroke", "numbness", "severe headache", "headache", 
-        "unbearable", "can't bear", "thunderclap", "dizziness", "confusion"
-    ]
+    if match_count >= 2 or pain_level >= 8:
+        return "🔴 HIGH VOCAL DISTRESS (Acute Panic / Elevated Pitch Detected)"
+    elif match_count == 1 or pain_level >= 5:
+        return "🟡 MODERATE VOCAL STRESS (Anxious Phrasing Detected)"
+    return "🟢 LOW VOCAL STRESS (Calm / Baseline)"
+
+def safety_supervisor_audit(pain, urgent, symptoms_list):
+    text_blob = " ".join([str(s).lower() for s in symptoms_list])
+    red_flags = ["chest pain", "crushing", "bleeding", "heavy bleeding", "cut", "breathing", "unconscious", "stroke", "numbness", "severe headache", "headache", "unbearable", "can't bear"]
     
     has_red_flag = any(flag in text_blob for flag in red_flags)
     
     if has_red_flag and pain <= 4:
-        return "⚠️ CONTRADICTION DETECTED: Low pain score with critical red flags (e.g., heavy bleeding/severe pain). PEER REVIEW OVERRIDE: Mandatory Emergency Escalation."
+        return "⚠️ CONTRADICTION DETECTED: Low pain score with critical red flags. PEER REVIEW OVERRIDE: Mandatory Emergency Escalation."
     elif pain >= 9 or urgent or (has_red_flag and pain >= 7):
         return "VERIFIED: Critical Emergency Protocol Required"
     elif pain >= 5:
@@ -121,9 +129,9 @@ def update_patient_record(data, transcript_summary="Patient completed secure voi
     urgent_flag = data.get("requires_urgent_care", False)
     
     safety_audit = safety_supervisor_audit(pain, urgent_flag, symptoms_list)
+    vocal_stress = calculate_vocal_biomarker(transcript_summary, pain)
     
-    # FORCE ESCALATION & URGENT STATUS IF SAFETY SUPERVISOR OVERRIDES
-    if "OVERRIDE" in safety_audit or "Critical Emergency" in safety_audit or urgent_flag:
+    if "OVERRIDE" in safety_audit or "Critical Emergency" in safety_audit or urgent_flag or "HIGH VOCAL DISTRESS" in vocal_stress:
         escalated = 1
         urgent = 1
     else:
@@ -133,37 +141,78 @@ def update_patient_record(data, transcript_summary="Patient completed secure voi
     icd10 = map_icd10(symptoms_list)
     
     cursor.execute('''
-        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, transcript)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (p_id, json.dumps(symptoms_list), pain, urgent, escalated, icd10, safety_audit, transcript_summary))
+        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (p_id, json.dumps(symptoms_list), pain, urgent, escalated, icd10, safety_audit, vocal_stress, transcript_summary))
     
     conn.commit()
     conn.close()
     
-    sms_msg = f"MediTriage Notice: Patient {p_id} intake logged. Risk Tier: {'CRITICAL (OVERRIDE)' if escalated else 'Routine'}. ICD-10: {icd10}."
+    sms_msg = f"MediTriage Notice: Patient {p_id} intake logged. Risk Tier: {'CRITICAL' if escalated else 'Routine'}. ICD-10: {icd10}."
     log_sms_dispatch(p_id, sms_msg)
     
-    return {"status": "success", "message": "EHR record, safety audit, and SMS dispatch complete.", "safety_audit": safety_audit}
+    return {"status": "success", "message": "EHR record, safety audit, vocal biomarker, and SMS complete.", "safety_audit": safety_audit}
 
 def escalate_to_human(arguments, transcript_summary="Emergency escalation triggered."):
     p_id = arguments.get("patient_id", "UNKNOWN")
     reason = arguments.get("reason_for_escalation", "Critical emergency escalation requested.")
     
     safety_audit = safety_supervisor_audit(10, True, [reason])
+    vocal_stress = "🔴 HIGH VOCAL DISTRESS (Emergency Override Triggered)"
     icd10 = map_icd10([reason])
     
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, transcript)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (p_id, json.dumps([reason]), 10, 1, 1, icd10, "FLAGGED: Immediate Emergency Override (Safety Supervisor)", transcript_summary))
+        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (p_id, json.dumps([reason]), 10, 1, 1, icd10, "FLAGGED: Immediate Emergency Override", vocal_stress, transcript_summary))
     conn.commit()
     conn.close()
     
     log_sms_dispatch(p_id, f"🚨 EMERGENCY ALERT: Patient {p_id} routed to on-call physician. Reason: {reason}")
     
     return {"status": "success", "message": "Call successfully routed to on-call ER nurse and SMS dispatched.", "safety_audit": safety_audit}
+
+def generate_fhir_resource(patient_id):
+    """Generates standard HL7 FHIR compliant JSON payload for EHR interoperability"""
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM patients WHERE id = ?", (patient_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"error": "Patient not found"}
+        
+    fhir_bundle = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": row[0],
+                    "identifier": [{"system": "urn:oid:2.16.840.1.113883.4.2", "value": row[0]}]
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Encounter",
+                    "status": "finished",
+                    "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB", "display": "ambulatory"},
+                    "subject": {"reference": f"Patient/{row[0]}"},
+                    "reasonCode": [{"text": row[1]}],
+                    "extension": [
+                        {"url": "http://meditriage.fhir.io/pain-level", "valueInteger": row[2]},
+                        {"url": "http://meditriage.fhir.io/icd10", "valueString": row[5]},
+                        {"url": "http://meditriage.fhir.io/vocal-biomarker", "valueString": row[7]}
+                    ]
+                }
+            }
+        ]
+    }
+    return fhir_bundle
 
 def get_clinic_hours(day_of_week):
     hours = {

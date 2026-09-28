@@ -4,7 +4,7 @@ import sqlite3
 import pandas as pd
 import json
 import time
-from db import init_db
+from db import init_db, generate_fhir_resource
 
 init_db()
 
@@ -52,7 +52,7 @@ def load_data():
         conn.close()
         return df
     except Exception:
-        return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated", "icd10_code", "safety_status", "transcript"])
+        return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated", "icd10_code", "safety_status", "vocal_stress", "transcript"])
 
 def load_sms_logs():
     try:
@@ -115,13 +115,14 @@ with st.sidebar:
     st.markdown("🟢 **Voice Gateway:** Connected")
     st.markdown("🧠 **Longitudinal Memory:** Active")
     st.markdown("🤖 **Safety Supervisor:** Online")
-    st.markdown("📱 **Twilio SMS Gateway:** Connected")
+    st.markdown("🎙️ **Vocal Biomarkers:** Active")
+    st.markdown("🌐 **SMART on FHIR:** Ready")
     st.divider()
     
     auto_refresh = st.checkbox("🔄 Live Auto-Refresh (2s)", value=True)
 
 st.title("🏥 MediTriage Enterprise Clinical Command Center")
-st.markdown("Autonomous voice intake, longitudinal patient memory, multi-agent safety supervision, and Twilio dispatch logs.")
+st.markdown("Autonomous voice intake, vocal biomarker stress analysis, SMART on FHIR export, and clinical handover reports.")
 
 active_emergencies = len(df[df['escalated'] == 1]) if not df.empty and 'escalated' in df else 0
 if active_emergencies > 0:
@@ -152,13 +153,13 @@ st.divider()
 
 tab_queue, tab_audit, tab_sms, tab_analytics = st.tabs([
     "📋 Active Triage Queue", 
-    "🎙️ Call Audit & Audio Archive", 
+    "🎙️ Call Audit & Clinical Reports", 
     "📱 Twilio SMS Dispatch Log", 
     "📊 ICD-10 & Analytics"
 ])
 
 with tab_queue:
-    st.subheader("Active Patient Intake Queue & Safety Audits")
+    st.subheader("Active Patient Intake Queue, Vocal Biomarkers & Safety Audits")
     if df.empty:
         st.info("No patient records found. Run `python agent.py` to initiate a live voice triage call!")
     else:
@@ -175,9 +176,9 @@ with tab_queue:
             urgent = row['urgent']
             icd10 = row.get('icd10_code', 'N/A')
             safety = row.get('safety_status', 'Pending Audit')
+            vocal = row.get('vocal_stress', 'Normal')
             
-            # ENSURE OVERRIDE TRIGGERS CRITICAL BADGE IMMEDIATELY
-            if pain >= 8 or urgent == 1 or escalated == 1 or "OVERRIDE" in str(safety) or "Critical" in str(safety):
+            if pain >= 8 or urgent == 1 or escalated == 1 or "OVERRIDE" in str(safety) or "HIGH VOCAL" in str(vocal):
                 risk_badge = "🔴 CRITICAL RISK"
                 border_color = "#ff4b4b"
             elif pain >= 5:
@@ -195,22 +196,66 @@ with tab_queue:
                         <span style="background: {border_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">{risk_badge}</span>
                     </div>
                     <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>ICD-10:</b> <code style="color: #58a6ff;">{icd10}</code></p>
-                    <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Safety Supervisor:</b> <span style="color: #3fb950;">{safety}</span></p>
+                    <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Vocal Stress:</b> <span style="color: #ffa726;">{vocal}</span></p>
                 </div>
                 """, unsafe_allow_html=True)
 
 with tab_audit:
-    st.subheader("🎙️ Verbatim Audio Audit Archive & Waveform Simulation")
+    st.subheader("🎙️ Clinical Handoff Reports, FHIR Export & Verbatim Audits")
     if df.empty:
         st.info("No audit records available.")
     else:
         for index, row in df.iterrows():
             p_id = row['id']
             transcript = row.get('transcript', 'No transcript recorded.')
-            with st.expander(f"📁 Session Audit ID: {p_id}"):
-                st.markdown("**Simulated Audio Waveform Playback:**")
-                st.audio("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", format="audio/mp3")
-                st.markdown("**Verbatim Transcript:**")
+            icd10 = row.get('icd10_code', 'N/A')
+            vocal = row.get('vocal_stress', 'Normal')
+            pain = row['pain']
+            try:
+                symptoms_str = ", ".join(json.loads(row['symptoms']))
+            except:
+                symptoms_str = row['symptoms']
+                
+            with st.expander(f"📁 Session Handoff & Audit ID: {p_id}"):
+                col_rep1, col_rep2 = st.columns(2)
+                
+                with col_rep1:
+                    st.markdown("**📄 Official Clinical Handover Sheet:**")
+                    report_text = f"""--- MEDITRIAGE CLINICAL HANDOFF REPORT ---
+Patient ID: {p_id}
+Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
+Primary Symptoms: {symptoms_str}
+Pain Level: {pain}/10
+ICD-10 Code: {icd10}
+Vocal Biomarker Stress: {vocal}
+
+SOAP NOTE:
+- S (Subjective): Patient reports {symptoms_str}. Pain rated at {pain}/10.
+- O (Objective): Voice intake processed via AssemblyAI Real-Time Voice Gateway. Vocal stress index evaluated as {vocal}.
+- A (Assessment): Patient prioritized under clinical guidelines. ICD-10 assigned: {icd10}.
+- P (Plan): Routine or emergency routing synchronized with EHR database.
+--------------------------------------------"""
+                    st.download_button(
+                        label="📥 Download Clinical Report (TXT)",
+                        data=report_text,
+                        file_name=f"meditriage_report_{p_id}.txt",
+                        mime="text/plain",
+                        key=f"rep_{p_id}"
+                    )
+                    
+                with col_rep2:
+                    st.markdown("**🌐 SMART on FHIR Interoperability JSON:**")
+                    fhir_json = json.dumps(generate_fhir_resource(p_id), indent=2)
+                    st.download_button(
+                        label="📥 Export FHIR Bundle (JSON)",
+                        data=fhir_json,
+                        file_name=f"fhir_patient_{p_id}.json",
+                        mime="application/json",
+                        key=f"fhir_{p_id}"
+                    )
+                    
+                st.divider()
+                st.markdown("**🔍 Verbatim Audio Audit Transcript:**")
                 st.code(transcript, language="text")
 
 with tab_sms:
@@ -229,6 +274,6 @@ with tab_analytics:
     else:
         st.write("Awaiting live intake telemetry...")
 
-if auto_raising := auto_refresh:
+if auto_refresh:
     time.sleep(2)
     st.rerun()
