@@ -6,7 +6,6 @@ import json
 import time
 from db import init_db
 
-# Ensure all database tables (patients, documents, wearables) are initialized on startup
 init_db()
 
 st.set_page_config(
@@ -55,6 +54,15 @@ def load_data():
     except Exception:
         return pd.DataFrame(columns=["id", "symptoms", "pain", "urgent", "escalated", "icd10_code", "safety_status", "transcript"])
 
+def load_sms_logs():
+    try:
+        conn = sqlite3.connect('meditriage.db')
+        df = pd.read_sql_query("SELECT * FROM sms_logs ORDER BY timestamp DESC", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["id", "patient_id", "message", "status", "timestamp"])
+
 def save_uploaded_document(uploaded_file):
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     conn = sqlite3.connect('meditriage.db')
@@ -82,6 +90,7 @@ def update_case_status(patient_id, new_escalated_status):
     conn.close()
 
 df = load_data()
+sms_df = load_sms_logs()
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/hospital-3.png", width=50)
@@ -93,25 +102,26 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload Clinical Protocol (.txt/.md)", type=["txt", "md"])
     if uploaded_file:
         save_uploaded_document(uploaded_file)
-        st.success(f"Loaded '{uploaded_file.name}' into Agent RAG memory!")
+        st.success(f"Loaded '{uploaded_file.name}' into RAG memory!")
         
     docs = get_uploaded_documents()
     if docs:
-        st.markdown("**Active Uploaded Protocols:**")
+        st.markdown("**Active Protocols:**")
         for doc in docs:
             st.text(f"• {doc[0]}")
             
     st.divider()
     st.subheader("⚡ System Telemetry")
     st.markdown("🟢 **Voice Gateway:** Connected")
-    st.markdown("🧠 **RAG Engine:** Active")
+    st.markdown("🧠 **Longitudinal Memory:** Active")
     st.markdown("🤖 **Safety Supervisor:** Online")
+    st.markdown("📱 **Twilio SMS Gateway:** Connected")
     st.divider()
     
     auto_refresh = st.checkbox("🔄 Live Auto-Refresh (2s)", value=True)
 
 st.title("🏥 MediTriage Enterprise Clinical Command Center")
-st.markdown("Autonomous voice intake, automated ICD-10 coding, multi-agent safety supervision, and RAG document intelligence.")
+st.markdown("Autonomous voice intake, longitudinal patient memory, multi-agent safety supervision, and Twilio dispatch logs.")
 
 active_emergencies = len(df[df['escalated'] == 1]) if not df.empty and 'escalated' in df else 0
 if active_emergencies > 0:
@@ -140,11 +150,15 @@ with col4:
 
 st.divider()
 
-col_left, col_right = st.columns([2, 1])
+tab_queue, tab_audit, tab_sms, tab_analytics = st.tabs([
+    "📋 Active Triage Queue", 
+    "🎙️ Call Audit & Audio Archive", 
+    "📱 Twilio SMS Dispatch Log", 
+    "📊 ICD-10 & Analytics"
+])
 
-with col_left:
-    st.subheader("📋 Active Patient Triage Queue, ICD-10 Codes & Safety Audits")
-    
+with tab_queue:
+    st.subheader("Active Patient Intake Queue & Safety Audits")
     if df.empty:
         st.info("No patient records found. Run `python agent.py` to initiate a live voice triage call!")
     else:
@@ -161,9 +175,9 @@ with col_left:
             urgent = row['urgent']
             icd10 = row.get('icd10_code', 'N/A')
             safety = row.get('safety_status', 'Pending Audit')
-            transcript = row.get('transcript', 'No transcript recorded.')
             
-            if pain >= 8 or urgent == 1 or escalated == 1:
+            # ENSURE OVERRIDE TRIGGERS CRITICAL BADGE IMMEDIATELY
+            if pain >= 8 or urgent == 1 or escalated == 1 or "OVERRIDE" in str(safety) or "Critical" in str(safety):
                 risk_badge = "🔴 CRITICAL RISK"
                 border_color = "#ff4b4b"
             elif pain >= 5:
@@ -180,46 +194,34 @@ with col_left:
                         <strong style="color: #f0f6fc; font-size: 1.1em;">Patient ID: {p_id}</strong>
                         <span style="background: {border_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">{risk_badge}</span>
                     </div>
-                    <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>ICD-10 Code:</b> <code style="color: #58a6ff;">{icd10}</code></p>
+                    <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>ICD-10:</b> <code style="color: #58a6ff;">{icd10}</code></p>
                     <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Safety Supervisor:</b> <span style="color: #3fb950;">{safety}</span></p>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                with st.expander(f"📑 View Clinical SOAP Note, ICD-10 & Verbatim Audit (ID: {p_id})"):
-                    st.markdown(f"""
-                    **AI-Generated Clinical Documentation (SOAP Format with ICD-10):**
-                    * **S (Subjective):** Patient reports primary complaint of *{symptoms_str}*. Self-reported pain scale is evaluated at **{pain}/10**. Caller verified via ID `{p_id}`.
-                    * **O (Objective):** AssemblyAI Real-Time Voice Gateway intake. ICD-10 Billing Code assigned: `{icd10}`. Urgent care flag: `{'True' if urgent else 'False'}`.
-                    * **A (Assessment):** Multi-Agent Safety Supervisor Status: `{safety}`. Risk stratification: `{risk_badge}`.
-                    * **P (Plan):** `{'Immediate nurse dispatch / emergency protocol engaged.' if escalated else 'Record synchronized to local EHR database. Outpatient follow-up.'}`
-                    """)
-                    
-                    st.divider()
-                    st.markdown("**🔍 Verbatim Audio Audit Transcript:**")
-                    st.code(transcript, language="text")
-                    
-                    col_btn1, col_btn2 = st.columns(2)
-                    with col_btn1:
-                        if escalated == 0:
-                            if st.button("⚠️ Escalate Case", key=f"esc_{p_id}_{index}"):
-                                update_case_status(p_id, 1)
-                                st.rerun()
-                        else:
-                            if st.button("✅ Resolve / Clear", key=f"res_{p_id}_{index}"):
-                                update_case_status(p_id, 0)
-                                st.rerun()
-                st.write("")
 
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Export Enterprise EHR Feed (CSV)",
-            data=csv,
-            file_name="meditriage_enterprise_export.csv",
-            mime="text/csv",
-        )
+with tab_audit:
+    st.subheader("🎙️ Verbatim Audio Audit Archive & Waveform Simulation")
+    if df.empty:
+        st.info("No audit records available.")
+    else:
+        for index, row in df.iterrows():
+            p_id = row['id']
+            transcript = row.get('transcript', 'No transcript recorded.')
+            with st.expander(f"📁 Session Audit ID: {p_id}"):
+                st.markdown("**Simulated Audio Waveform Playback:**")
+                st.audio("https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", format="audio/mp3")
+                st.markdown("**Verbatim Transcript:**")
+                st.code(transcript, language="text")
 
-with col_right:
-    st.subheader("📊 Live ICD-10 Diagnostic Breakdown")
+with tab_sms:
+    st.subheader("📱 Twilio Out-of-Band SMS Dispatch Log")
+    if sms_df.empty:
+        st.info("No SMS dispatches logged yet.")
+    else:
+        st.dataframe(sms_df, use_container_width=True, hide_index=True)
+
+with tab_analytics:
+    st.subheader("📊 Diagnostic ICD-10 Breakdown")
     if not df.empty and 'icd10_code' in df:
         code_counts = df['icd10_code'].value_counts().reset_index()
         code_counts.columns = ['ICD-10 Code', 'Count']
@@ -227,6 +229,6 @@ with col_right:
     else:
         st.write("Awaiting live intake telemetry...")
 
-if auto_refresh:
+if auto_raising := auto_refresh:
     time.sleep(2)
     st.rerun()

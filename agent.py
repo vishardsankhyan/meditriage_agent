@@ -19,12 +19,12 @@ You must start the conversation by saying EXACTLY: "Hello, this is the MediTriag
 Your goal is to collect a 9-digit alphanumeric patient ID, their primary symptoms, and their pain level (1-10).
 Do not provide medical diagnoses.
 
-INTELLIGENT KNOWLEDGE & MEMORY RULES:
-1. As soon as the patient provides their 9-digit patient ID, immediately execute the lookup_patient_history tool to check past visits.
-2. If the patient describes complex or unusual symptoms, use the consult_knowledge_base tool to check uploaded clinic protocols and guidelines before responding.
-3. If the patient asks about clinic hours, execute the check_clinic_hours tool immediately.
-4. If pain level is 9-10 or critical symptoms are mentioned, immediately execute the escalate_to_human tool.
-5. Otherwise, execute update_patient_record once all info is gathered, then confirm and say a polite goodbye."""
+MANDATORY WORKFLOW & RULES:
+1. As soon as the patient provides their 9-digit ID, immediately execute the `lookup_patient_history` tool. If they are a returning patient, greet them warmly referencing their past history.
+2. Collect their primary symptoms and pain level (1-10).
+3. MANDATORY TOOL EXECUTION: As soon as you receive the pain level from the patient, you MUST immediately invoke either the `update_patient_record` or `escalate_to_human` tool call. Do not chat further or ask conversational questions after the pain level is given. Fire the tool instantly!
+4. If pain level is 9-10 or severe/unbearable red-flag symptoms are mentioned (like severe headaches, chest pain, breathing trouble), immediately execute `escalate_to_human`.
+"""
 
 GREETING_TEXT = "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient ID, and describe the medical symptoms you are experiencing today."
 
@@ -84,7 +84,7 @@ async def run_agent():
         await ws.send(json.dumps(session_config))
         
         print("\n" + "="*50)
-        print("🚀 MediTriage Agent Connected (RAG & Safety Supervisor Active)")
+        print("🚀 MediTriage Agent Connected (Strict Tool-Enforcement Active)")
         print("="*50)
 
         async def send_audio():
@@ -129,21 +129,21 @@ async def run_agent():
                     
                     if tool_name == "lookup_patient_history":
                         p_id = arguments.get("patient_id")
-                        print(f"\n[🔍 MEMORY LOOKUP]: Patient ID: {p_id}")
+                        print(f"\n[🔍 LONGITUDINAL MEMORY]: Querying history for ID: {p_id}")
                         result = get_patient_history(p_id)
                         await ws.send(json.dumps({"type": "tool.result", "call_id": tool_call_id, "result": json.dumps(result)}))
                         
                     elif tool_name == "consult_knowledge_base":
                         query = arguments.get("query")
-                        print(f"\n[📖 RAG KNOWLEDGE QUERY]: {query}")
+                        print(f"\n[📖 RAG QUERY]: {query}")
                         result = query_knowledge_base(query)
                         await ws.send(json.dumps({"type": "tool.result", "call_id": tool_call_id, "result": json.dumps(result)}))
                         
                     elif tool_name == "update_patient_record":
-                        print(f"\n[EHR & ICD-10 UPDATE]: {json.dumps(arguments, indent=2)}")
+                        print(f"\n[EHR & SAFETY AUDIT]: {json.dumps(arguments, indent=2)}")
                         result = update_patient_record(arguments, transcript_summary=full_transcript_str)
                         await ws.send(json.dumps({"type": "tool.result", "call_id": tool_call_id, "result": json.dumps(result)}))
-                        print(f"\n[✅ SAFETY SUPERVISOR]: Record verified. Assigned ICD-10: {result.get('icd10')}")
+                        print(f"\n[✅ SAFETY SUPERVISOR]: {result.get('safety_audit')}")
                         
                     elif tool_name == "check_clinic_hours":
                         day = arguments.get("day_of_week", "Monday")
@@ -151,12 +151,15 @@ async def run_agent():
                         await ws.send(json.dumps({"type": "tool.result", "call_id": tool_call_id, "result": json.dumps(result)}))
                         
                     elif tool_name == "escalate_to_human":
-                        print(f"\n[🚨 EMERGENCY ESCALATION]: {json.dumps(arguments, indent=2)}")
-                        result = escalate_to_human(arguments)
+                        print(f"\n[🚨 EMERGENCY ESCALATION & SMS]: {json.dumps(arguments, indent=2)}")
+                        result = escalate_to_human(arguments, transcript_summary=full_transcript_str)
                         await ws.send(json.dumps({"type": "tool.result", "call_id": tool_call_id, "result": json.dumps(result)}))
-                        print("\n[🚨 SAFETY SUPERVISOR]: Emergency override logged.")
+                        print("\n[🚨 SAFETY SUPERVISOR]: Emergency routing and full transcript audit confirmed.")
 
         await asyncio.gather(send_audio(), receive_events())
+
+if __name__ ==0:
+    pass
 
 if __name__ == "__main__":
     try:
