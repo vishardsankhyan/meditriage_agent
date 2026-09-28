@@ -1,6 +1,5 @@
 # agent.py
 import asyncio
-import sys
 import websockets
 import json
 import os
@@ -9,8 +8,8 @@ import ssl
 import queue
 from dotenv import load_dotenv
 from audio import Mic, Speaker
-from db import update_patient_record, escalate_to_human, get_clinic_hours
-from schemas import PatientIntakeData, CheckClinicHours, EscalateToHuman
+from db import update_patient_record, escalate_to_human, get_clinic_hours, get_patient_history
+from schemas import PatientIntakeData, CheckClinicHours, EscalateToHuman, LookupPatientHistory
 
 load_dotenv()
 
@@ -20,10 +19,11 @@ You must start the conversation by saying EXACTLY: "Hello, this is the MediTriag
 Your goal is to collect a 9-digit alphanumeric patient ID, their primary symptoms, and their pain level (1-10).
 Do not provide medical diagnoses.
 
-ROUTING RULES:
-1. If the patient asks about clinic hours, operating hours, schedule, or availability, execute the check_clinic_hours tool immediately to get the answer, tell them the clinic's hours, and then smoothly return to gathering their medical information.
-2. If the patient reports a pain level of 9 or 10, or mentions critical symptoms (chest pain, severe bleeding, difficulty breathing), immediately execute the escalate_to_human tool.
-3. If it is a standard non-emergency, once you have the ID, symptoms, and pain level, execute the update_patient_record tool.
+INTELLIGENT ROUTING & MEMORY RULES:
+1. As soon as the patient provides their 9-digit patient ID, immediately execute the lookup_patient_history tool to check if they have past visits in our system. If they are a returning patient, greet them warmly and reference their past history.
+2. If the patient asks about clinic hours, execute the check_clinic_hours tool immediately.
+3. If the patient reports a pain level of 9 or 10, or mentions critical symptoms (chest pain, severe bleeding, difficulty breathing), immediately execute the escalate_to_human tool.
+4. If it is a standard non-emergency, once you have the ID, symptoms, and pain level, execute the update_patient_record tool.
 
 After update_patient_record or escalate_to_human is successfully saved, verbally confirm the record with the patient and say a polite goodbye wishing them well."""
 
@@ -40,6 +40,8 @@ async def run_agent():
     mic = Mic()
     speaker = Speaker()
     
+    session_transcript = []
+    
     async with websockets.connect(uri, additional_headers=headers, ssl=ssl_context) as ws:
         session_config = {
             "type": "session.update",
@@ -50,6 +52,12 @@ async def run_agent():
                     "voice": "ivy"
                 },
                 "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_patient_history",
+                        "description": "Look up previous patient records and history using their 9-digit ID.",
+                        "parameters": LookupPatientHistory.model_json_schema()
+                    },
                     {
                         "type": "function",
                         "name": "update_patient_record",
@@ -74,7 +82,7 @@ async def run_agent():
         await ws.send(json.dumps(session_config))
         
         print("\n" + "="*50)
-        print("🚀 MediTriage Agent Connected and Listening")
+        print("🚀 MediTriage Agent Connected and Listening (Memory Active)")
         print("="*50)
 
         async def send_audio():
@@ -103,10 +111,14 @@ async def run_agent():
                     speaker.play(base64.b64decode(event["data"]))
                     
                 elif event_type == "transcript.user":
-                    print(f"\n[PATIENT]: {event.get('text', '')}")
+                    text = event.get('text', '')
+                    print(f"\n[PATIENT]: {text}")
+                    session_transcript.append(f"Patient: {text}")
                     
                 elif event_type == "transcript.agent":
-                    print(f"\n[AGENT]: {event.get('text', '')}")
+                    text = event.get('text', '')
+                    print(f"\n[AGENT]: {text}")
+                    session_transcript.append(f"Agent: {text}")
                     
                 elif event_type == "input.speech.started":
                     speaker.flush_and_restart()
@@ -116,18 +128,27 @@ async def run_agent():
                     tool_call_id = event["call_id"]
                     tool_name = event["name"]
                     arguments = event["arguments"] 
+                    full_transcript_str = "\n".join(session_transcript)
                     
-                    if tool_name == "update_patient_record":
-                        print(f"\n[EHR UPDATE TRIGGERED]: {json.dumps(arguments, indent=2)}")
-                        result = update_patient_record(arguments)
-                        
-                        # Send result back to server; let the agent speak completely naturally
+                    if tool_name == "lookup_patient_history":
+                        p_id = arguments.get("patient_id")
+                        print(f"\n[🔍 MEMORY LOOKUP]: Checking EHR history for Patient ID: {p_id}")
+                        result = get_patient_history(p_id)
                         await ws.send(json.dumps({
                             "type": "tool.result", 
                             "call_id": tool_call_id, 
                             "result": json.dumps(result)
                         }))
-                        print("\n[SYSTEM]: Record saved successfully. Agent is speaking confirmation...")
+                        
+                    elif tool_name == "update_patient_record":
+                        print(f"\n[EHR UPDATE TRIGGERED]: {json.dumps(arguments, indent=2)}")
+                        result = update_patient_record(arguments, transcript_summary=full_transcript_str)
+                        await ws.send(json.dumps({
+                            "type": "tool.result", 
+                            "call_id": tool_call_id, 
+                            "result": json.dumps(result)
+                        }))
+                        print("\n[SYSTEM]: Record saved with audit transcript.")
                         
                     elif tool_name == "check_clinic_hours":
                         day = arguments.get("day_of_week", "Monday")
@@ -147,7 +168,7 @@ async def run_agent():
                             "call_id": tool_call_id, 
                             "result": json.dumps(result)
                         }))
-                        print("\n[SYSTEM]: Escalation logged. Agent is transferring the call...")
+                        print("\n[SYSTEM]: Escalation logged with audit trail.")
 
         await asyncio.gather(send_audio(), receive_events())
 
@@ -156,4 +177,5 @@ if __name__ == "__main__":
         asyncio.run(run_agent())
     except KeyboardInterrupt:
         print("\nSession ended by user.")
+        import sys
         sys.exit(0)
