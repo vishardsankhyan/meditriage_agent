@@ -156,6 +156,53 @@ def get_patient_history(patient_id):
         }
     return {"found": False, "message": "No previous records found for this patient ID."}
 
+def get_patient_dossier(patient_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM patients WHERE id = ?", (patient_id,))
+    patient_row = cursor.fetchone()
+    
+    cursor.execute("SELECT id, order_type, order_details, status, timestamp FROM clinical_orders WHERE patient_id = ?", (patient_id,))
+    orders = cursor.fetchall()
+    
+    cursor.execute("SELECT message, status, timestamp FROM sms_logs WHERE patient_id = ?", (patient_id,))
+    sms = cursor.fetchall()
+    
+    cursor.execute("SELECT action_type, clinical_note, status, timestamp FROM doctor_actions WHERE patient_id = ?", (patient_id,))
+    actions = cursor.fetchall()
+    
+    conn.close()
+    
+    if not patient_row:
+        return None
+        
+    return {
+        "patient_id": patient_id,
+        "symptoms": patient_row[0],
+        "pain": patient_row[1],
+        "urgent": patient_row[2],
+        "escalated": patient_row[3],
+        "icd10_code": patient_row[4],
+        "safety_status": patient_row[5],
+        "vocal_stress": patient_row[6],
+        "transcript": patient_row[7],
+        "orders": orders,
+        "sms": sms,
+        "actions": actions
+    }
+
+def resolve_patient_escalation(patient_id):
+    """Marks a critical patient emergency as addressed/resolved by a clinician"""
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE patients SET escalated = 0, urgent = 0 WHERE id = ?", (patient_id,))
+    cursor.execute("INSERT INTO doctor_actions (patient_id, action_type, clinical_note, status) VALUES (?, ?, ?, ?)",
+                   (patient_id, "EMERGENCY_RESOLVED", "Clinician reviewed and marked critical issue as addressed.", "RESOLVED"))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Escalation resolved."}
+
 def add_doctor_whisper(patient_id, instruction):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
