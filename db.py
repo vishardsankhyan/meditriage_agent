@@ -39,14 +39,52 @@ def init_db():
         )
     ''')
     
-    # New table for Automated E-Prescriptions & Lab Requisitions
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clinical_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id TEXT,
             order_type TEXT,
             order_details TEXT,
-            status TEXT,
+            status TEXT DEFAULT 'Pending Physician Sign-off',
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS live_transcripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT,
+            speaker TEXT,
+            text TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS active_sessions (
+            patient_id TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'ACTIVE',
+            started_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS doctor_intercom (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT,
+            instruction TEXT,
+            status TEXT DEFAULT 'PENDING',
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS doctor_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT,
+            action_type TEXT,
+            clinical_note TEXT,
+            status TEXT DEFAULT 'ACTIVE',
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -59,6 +97,46 @@ def init_db():
             
     conn.commit()
     conn.close()
+
+def register_active_session(patient_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO active_sessions (patient_id, status) VALUES (?, 'ACTIVE')", (patient_id,))
+    conn.commit()
+    conn.close()
+
+def close_active_session(patient_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE active_sessions SET status = 'COMPLETED' WHERE patient_id = ?", (patient_id,))
+    conn.commit()
+    conn.close()
+
+def get_active_sessions():
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT patient_id, started_at FROM active_sessions WHERE status = 'ACTIVE'")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def log_live_utterance(patient_id, speaker, text):
+    if not patient_id:
+        patient_id = "LIVE_CALL"
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO live_transcripts (patient_id, speaker, text) VALUES (?, ?, ?)",
+                   (patient_id, speaker, text))
+    conn.commit()
+    conn.close()
+
+def get_live_transcripts(patient_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT speaker, text, timestamp FROM live_transcripts WHERE patient_id = ? ORDER BY timestamp ASC", (patient_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 def get_patient_history(patient_id):
     conn = sqlite3.connect('meditriage.db')
@@ -78,6 +156,54 @@ def get_patient_history(patient_id):
         }
     return {"found": False, "message": "No previous records found for this patient ID."}
 
+def add_doctor_whisper(patient_id, instruction):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO doctor_intercom (patient_id, instruction, status) VALUES (?, ?, ?)",
+                   (patient_id, instruction, "PENDING"))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Message queued for AI."}
+
+def check_doctor_intercom_db(patient_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, instruction FROM doctor_intercom WHERE patient_id = ? AND status = 'PENDING'", (patient_id,))
+    rows = cursor.fetchall()
+    
+    if rows:
+        for row in rows:
+            cursor.execute("UPDATE doctor_intercom SET status = 'ACKNOWLEDGED' WHERE id = ?", (row[0],))
+        conn.commit()
+        conn.close()
+        
+        instructions = " ".join([r[1].strip() for r in rows])
+        return json.dumps({
+            "CRITICAL_ALERT": "DOCTOR_WHISPER_INTERRUPTION",
+            "EXACT_PHRASE_TO_SPEAK_OUT_LOUD": f"The on-call doctor has asked me to tell you: {instructions}"
+        })
+    
+    conn.close()
+    return json.dumps({"CRITICAL_ALERT": "NONE"})
+
+def bridge_physician_call(patient_id, note):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO doctor_actions (patient_id, action_type, clinical_note, status) VALUES (?, ?, ?, ?)",
+                   (patient_id, "LIVE_CALL_BRIDGE", note, "CONNECTED"))
+    conn.commit()
+    conn.close()
+    log_sms_dispatch(patient_id, f"🚨 PHYSICIAN BRIDGE: Doctor joined live call with patient {patient_id}. Note: {note}")
+    return {"status": "success", "message": "Physician bridged successfully."}
+
+def approve_clinical_order(order_id):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE clinical_orders SET status = 'APPROVED & DISPATCHED (EHR)' WHERE id = ?", (order_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Order approved."}
+
 def map_icd10(symptoms_list):
     text = " ".join(symptoms_list).lower()
     if "cut" in text or "bleeding" in text:
@@ -93,13 +219,9 @@ def map_icd10(symptoms_list):
     return "R69 (Illness, unspecified)"
 
 def generate_automated_orders(patient_id, symptoms_list, icd10_code):
-    """Autonomously generates e-Prescriptions and Lab Requisitions based on ICD-10 & Protocols"""
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    
-    # Clear existing orders for this update cycle to avoid duplicates
     cursor.execute("DELETE FROM clinical_orders WHERE patient_id = ?", (patient_id,))
-    
     text = " ".join(symptoms_list).lower()
     
     if "cut" in text or "bleeding" in text:
@@ -128,7 +250,6 @@ def calculate_vocal_biomarker(transcript_text, pain_level):
     text = transcript_text.lower()
     panic_words = ["can't bear", "severe", "hurry", "emergency", "unbearable", "worst", "help", "pain"]
     match_count = sum(1 for word in panic_words if word in text)
-    
     if match_count >= 2 or pain_level >= 8:
         return "🔴 HIGH VOCAL DISTRESS (Acute Panic / Elevated Pitch Detected)"
     elif match_count == 1 or pain_level >= 5:
@@ -138,11 +259,9 @@ def calculate_vocal_biomarker(transcript_text, pain_level):
 def safety_supervisor_audit(pain, urgent, symptoms_list):
     text_blob = " ".join([str(s).lower() for s in symptoms_list])
     red_flags = ["chest pain", "crushing", "bleeding", "heavy bleeding", "cut", "breathing", "unconscious", "stroke", "numbness", "severe headache", "headache", "unbearable", "can't bear"]
-    
     has_red_flag = any(flag in text_blob for flag in red_flags)
-    
     if has_red_flag and pain <= 4:
-        return "⚠️ CONTRADICTION DETECTED: Low pain score with critical red flags. PEER REVIEW OVERRIDE: Mandatory Emergency Escalation."
+        return "⚠️ CONTRADICTION DETECTED: Low pain score with critical red flags. Mandatory Emergency Escalation."
     elif pain >= 9 or urgent or (has_red_flag and pain >= 7):
         return "VERIFIED: Critical Emergency Protocol Required"
     elif pain >= 5:
@@ -160,10 +279,8 @@ def log_sms_dispatch(patient_id, message):
 def update_patient_record(data, transcript_summary="Patient completed secure voice intake successfully."):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    
     if hasattr(data, "dict"):
         data = data.dict()
-        
     p_id = data.get("patient_id")
     symptoms_list = data.get("primary_symptoms", [])
     pain = data.get("pain_level")
@@ -189,13 +306,11 @@ def update_patient_record(data, transcript_summary="Patient completed secure voi
     conn.commit()
     conn.close()
     
-    # Automatically generate e-Prescribe and Lab Requisitions
     generate_automated_orders(p_id, symptoms_list, icd10)
+    log_sms_dispatch(p_id, f"MediTriage Notice: Patient {p_id} intake logged. Risk Tier: {'CRITICAL' if escalated else 'Routine'}.")
+    close_active_session(p_id)
     
-    sms_msg = f"MediTriage Notice: Patient {p_id} intake logged. Risk Tier: {'CRITICAL' if escalated else 'Routine'}. ICD-10: {icd10}."
-    log_sms_dispatch(p_id, sms_msg)
-    
-    return {"status": "success", "message": "EHR record, clinical orders, and safety audit complete.", "safety_audit": safety_audit}
+    return {"status": "success", "message": "EHR record complete.", "safety_audit": safety_audit}
 
 def escalate_to_human(arguments, transcript_summary="Emergency escalation triggered."):
     p_id = arguments.get("patient_id", "UNKNOWN")
@@ -216,8 +331,9 @@ def escalate_to_human(arguments, transcript_summary="Emergency escalation trigge
     
     generate_automated_orders(p_id, [reason], icd10)
     log_sms_dispatch(p_id, f"🚨 EMERGENCY ALERT: Patient {p_id} routed to on-call physician. Reason: {reason}")
+    close_active_session(p_id)
     
-    return {"status": "success", "message": "Call successfully routed to on-call ER nurse and clinical orders generated.", "safety_audit": safety_audit}
+    return {"status": "success", "message": "Call routed to on-call ER nurse.", "safety_audit": safety_audit}
 
 def generate_fhir_resource(patient_id):
     conn = sqlite3.connect('meditriage.db')
@@ -225,51 +341,19 @@ def generate_fhir_resource(patient_id):
     cursor.execute("SELECT id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM patients WHERE id = ?", (patient_id,))
     row = cursor.fetchone()
     conn.close()
-    
     if not row:
         return {"error": "Patient not found"}
-        
-    fhir_bundle = {
+    return {
         "resourceType": "Bundle",
         "type": "collection",
         "entry": [
-            {
-                "resource": {
-                    "resourceType": "Patient",
-                    "id": row[0],
-                    "identifier": [{"system": "urn:oid:2.16.840.1.113883.4.2", "value": row[0]}]
-                }
-            },
-            {
-                "resource": {
-                    "resourceType": "Encounter",
-                    "status": "finished",
-                    "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB", "display": "ambulatory"},
-                    "subject": {"reference": f"Patient/{row[0]}"},
-                    "reasonCode": [{"text": row[1]}],
-                    "extension": [
-                        {"url": "http://meditriage.fhir.io/pain-level", "valueInteger": row[2]},
-                        {"url": "http://meditriage.fhir.io/icd10", "valueString": row[5]},
-                        {"url": "http://meditriage.fhir.io/vocal-biomarker", "valueString": row[7]}
-                    ]
-                }
-            }
+            {"resource": {"resourceType": "Patient", "id": row[0]}},
+            {"resource": {"resourceType": "Encounter", "status": "finished", "subject": {"reference": f"Patient/{row[0]}"}, "reasonCode": [{"text": row[1]}]}}
         ]
     }
-    return fhir_bundle
 
-def get_clinic_hours(day_of_week):
-    hours = {
-        "Monday": "8:00 AM to 6:00 PM",
-        "Tuesday": "8:00 AM to 6:00 PM",
-        "Wednesday": "8:00 AM to 6:00 PM",
-        "Thursday": "8:00 AM to 6:00 PM",
-        "Friday": "8:00 AM to 6:00 PM",
-        "Saturday": "10:00 AM to 4:00 PM",
-        "Sunday": "Closed"
-    }
-    day = day_of_week.capitalize()
-    return {"day": day, "hours": hours.get(day, "8:00 AM to 6:00 PM")}
+def get_clinic_hours(day):
+    return {"day": day, "hours": "8:00 AM to 6:00 PM"}
 
 def query_knowledge_base(query):
     conn = sqlite3.connect('meditriage.db')
@@ -277,19 +361,9 @@ def query_knowledge_base(query):
     cursor.execute("SELECT filename, content FROM documents")
     rows = cursor.fetchall()
     conn.close()
-    
-    results = []
-    clean_query = query.lower().strip()
-    
     for filename, content in rows:
-        paragraphs = content.split('\n\n')
-        for p in paragraphs:
-            p_lower = p.lower()
-            if clean_query in p_lower or all(term in p_lower for term in clean_query.split() if len(term) > 3):
-                results.append(f"[{filename}]: {p.strip()}")
-                
-    if not results:
-        return {"found": False, "guidance": "No specific uploaded protocol found. Follow standard triage guidelines."}
-    return {"found": True, "guidance": "\n\n".join(results[:1])}
+        if query.lower() in content.lower():
+            return {"found": True, "guidance": content[:300]}
+    return {"found": False, "guidance": "Follow standard protocol."}
 
 init_db()

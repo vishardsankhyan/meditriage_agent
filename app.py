@@ -4,9 +4,8 @@ import sqlite3
 import pandas as pd
 import json
 import time
-from db import init_db, generate_fhir_resource
+from db import init_db, generate_fhir_resource, get_live_transcripts, bridge_physician_call, add_doctor_whisper, approve_clinical_order, get_active_sessions
 
-# Initialize database and tables on startup
 init_db()
 
 st.set_page_config(
@@ -49,7 +48,7 @@ st.markdown("""
 def load_data():
     try:
         conn = sqlite3.connect('meditriage.db')
-        df = pd.read_sql_query("SELECT * FROM patients", conn)
+        df = pd.read_sql_query("SELECT * FROM patients ORDER BY escalated DESC, pain DESC", conn)
         conn.close()
         return df
     except Exception:
@@ -73,6 +72,15 @@ def load_clinical_orders():
     except Exception:
         return pd.DataFrame(columns=["id", "patient_id", "order_type", "order_details", "status", "timestamp"])
 
+def load_doctor_actions():
+    try:
+        conn = sqlite3.connect('meditriage.db')
+        df = pd.read_sql_query("SELECT * FROM doctor_actions ORDER BY timestamp DESC", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["id", "patient_id", "action_type", "clinical_note", "status", "timestamp"])
+
 def save_uploaded_document(uploaded_file):
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     conn = sqlite3.connect('meditriage.db')
@@ -95,6 +103,8 @@ def get_uploaded_documents():
 df = load_data()
 sms_df = load_sms_logs()
 orders_df = load_clinical_orders()
+actions_df = load_doctor_actions()
+active_calls = get_active_sessions()
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/hospital-3.png", width=50)
@@ -116,23 +126,23 @@ with st.sidebar:
             
     st.divider()
     st.subheader("⚡ System Telemetry")
-    st.markdown("🟢 **Voice Gateway:** Connected")
-    st.markdown("🧠 **Longitudinal Memory:** Active")
+    st.markdown(f"🟢 **Active Online Calls:** {len(active_calls)}")
     st.markdown("🤖 **Safety Supervisor:** Online")
-    st.markdown("💊 **E-Prescribe Engine:** Active")
-    st.markdown("🌐 **SMART on FHIR:** Ready")
+    st.markdown("📞 **Live Call Bridge:** Active")
+    st.markdown("🗣️ **AI Message Relay:** Ready")
+    st.markdown("💊 **Lab Approvals:** Active")
     st.divider()
     
     auto_refresh = st.checkbox("🔄 Live Auto-Refresh (2s)", value=True)
 
 st.title("🏥 MediTriage Enterprise Clinical Command Center")
-st.markdown("Autonomous voice intake, automated e-Prescriptions, lab requisition orders, vocal biomarkers, and SMART on FHIR export.")
+st.markdown("Real-time active call monitoring, AI message communication, physician call bridging, and lab/prescription approval sign-off.")
 
 active_emergencies = len(df[df['escalated'] == 1]) if not df.empty and 'escalated' in df else 0
 if active_emergencies > 0:
     st.markdown(f"""
         <div class="emergency-banner">
-            🚨 CRITICAL ALERT: {active_emergencies} Active Emergency Escalation(s) Require Immediate Nurse Review!
+            🚨 CRITICAL ALERT: {active_emergencies} Active Emergency Escalation(s) Require Immediate Doctor Action!
         </div>
     """, unsafe_allow_html=True)
 
@@ -141,81 +151,184 @@ st.divider()
 col1, col2, col3, col4 = st.columns(4)
 total_intakes = len(df)
 escalations = active_emergencies
-urgent_cases = len(df[df['urgent'] == 1]) if not df.empty and 'urgent' in df else 0
+active_online = len(active_calls)
 avg_pain = round(df['pain'].mean(), 1) if not df.empty and 'pain' in df else 0
 
 with col1:
-    st.metric(label="Total Intakes", value=total_intakes, delta="Live DB")
+    st.metric(label="Active Online Calls", value=active_online, delta="Live WebSocket" if active_online > 0 else "Idle")
 with col2:
     st.metric(label="Emergency Escalations", value=escalations, delta_color="inverse")
 with col3:
-    st.metric(label="Urgent Care Flags", value=urgent_cases)
+    st.metric(label="Total Completed Intakes", value=total_intakes)
 with col4:
     st.metric(label="Avg Reported Pain", value=f"{avg_pain} / 10")
 
 st.divider()
 
-# TAB DEFINITION WITH E-PRESCRIBE TAB INCLUDED
-tab_queue, tab_orders, tab_audit, tab_sms, tab_analytics = st.tabs([
-    "📋 Active Triage Queue", 
-    "💊 E-Prescriptions & Lab Orders", 
+tab_queue, tab_monitor, tab_orders, tab_audit, tab_sms, tab_analytics = st.tabs([
+    "📋 Severity Triage Queue", 
+    "🔴 Live Calls & AI Communicator", 
+    "💊 Lab & E-Prescribe Approvals", 
     "🎙️ Call Audit & Reports", 
     "📱 Twilio SMS Log", 
     "📊 ICD-10 & Analytics"
 ])
 
 with tab_queue:
-    st.subheader("Active Patient Intake Queue & Safety Audits")
+    st.subheader("📋 Severity-Segregated Patient Triage Queue (Historical EHR)")
+    st.markdown("Completed patient intaking sessions, categorized by clinical risk tier.")
+    
     if df.empty:
         st.info("No patient records found. Run `python agent.py` to initiate a live voice triage call!")
     else:
-        for index, row in df.iterrows():
-            p_id = row['id']
-            try:
-                symptoms_list = json.loads(row['symptoms'])
-                symptoms_str = ", ".join(symptoms_list)
-            except Exception:
-                symptoms_str = str(row['symptoms'])
+        critical_df = df[(df['escalated'] == 1) | (df['pain'] >= 8) | (df['urgent'] == 1)]
+        moderate_df = df[(df['escalated'] == 0) & (df['pain'] >= 5) & (df['pain'] < 8) & (df['urgent'] == 0)]
+        routine_df = df[(df['escalated'] == 0) & (df['pain'] < 5) & (df['urgent'] == 0)]
+        
+        st.markdown("### 🔴 Critical / Emergency Triage Tier")
+        if critical_df.empty:
+            st.success("No critical records.")
+        else:
+            for idx, row in critical_df.iterrows():
+                p_id = row['id']
+                try:
+                    symptoms_str = ", ".join(json.loads(row['symptoms']))
+                except:
+                    symptoms_str = row['symptoms']
+                pain = row['pain']
+                icd10 = row.get('icd10_code', 'N/A')
+                vocal = row.get('vocal_stress', 'Normal')
                 
-            pain = row['pain']
-            escalated = row['escalated']
-            urgent = row['urgent']
-            icd10 = row.get('icd10_code', 'N/A')
-            safety = row.get('safety_status', 'Pending Audit')
-            vocal = row.get('vocal_stress', 'Normal')
-            
-            if pain >= 8 or urgent == 1 or escalated == 1 or "OVERRIDE" in str(safety) or "HIGH VOCAL" in str(vocal):
-                risk_badge = "🔴 CRITICAL RISK"
-                border_color = "#ff4b4b"
-            elif pain >= 5:
-                risk_badge = "🟡 MODERATE RISK"
-                border_color = "#ffa726"
-            else:
-                risk_badge = "🟢 ROUTINE INTAKE"
-                border_color = "#2e7d32"
+                with st.expander(f"🔴 CRITICAL | Patient ID: {p_id} — Symptoms: {symptoms_str} (Pain: {pain}/10)"):
+                    st.markdown(f"**Primary Symptoms:** {symptoms_str}")
+                    st.markdown(f"**ICD-10 Code:** `{icd10}`")
+                    st.markdown(f"**Pain Level:** {pain} / 10")
+                    st.markdown(f"**Vocal Stress Index:** {vocal}")
+                    st.markdown(f"**Safety Status:** `{row.get('safety_status', 'N/A')}`")
+
+        st.markdown("### 🟡 Moderate Risk Tier")
+        if moderate_df.empty:
+            st.info("No moderate risk records.")
+        else:
+            for idx, row in moderate_df.iterrows():
+                p_id = row['id']
+                try:
+                    symptoms_str = ", ".join(json.loads(row['symptoms']))
+                except:
+                    symptoms_str = row['symptoms']
+                pain = row['pain']
+                icd10 = row.get('icd10_code', 'N/A')
                 
-            with st.container():
+                with st.expander(f"🟡 MODERATE | Patient ID: {p_id} — Symptoms: {symptoms_str} (Pain: {pain}/10)"):
+                    st.markdown(f"**Primary Symptoms:** {symptoms_str}")
+                    st.markdown(f"**ICD-10 Code:** `{icd10}`")
+                    st.markdown(f"**Pain Level:** {pain} / 10")
+
+        st.markdown("### 🟢 Routine Outpatient Tier")
+        if routine_df.empty:
+            st.info("No routine records.")
+        else:
+            for idx, row in routine_df.iterrows():
+                p_id = row['id']
+                try:
+                    symptoms_str = ", ".join(json.loads(row['symptoms']))
+                except:
+                    symptoms_str = row['symptoms']
+                pain = row['pain']
+                icd10 = row.get('icd10_code', 'N/A')
+                
+                with st.expander(f"🟢 ROUTINE | Patient ID: {p_id} — Symptoms: {symptoms_str} (Pain: {pain}/10)"):
+                    st.markdown(f"**Primary Symptoms:** {symptoms_str}")
+                    st.markdown(f"**ICD-10 Code:** `{icd10}`")
+                    st.markdown(f"**Pain Level:** {pain} / 10")
+
+with tab_monitor:
+    st.subheader("🔴 Currently Active Online Calls (Live WebSocket Sessions)")
+    st.markdown("Patients currently speaking with the AI voice agent appear here in real-time.")
+    
+    if not active_calls:
+        st.info("ℹ️ No patients are currently online. Run `python agent.py` in your terminal to start a live voice call simulation!")
+    else:
+        active_ids = [call[0] for call in active_calls]
+        selected_live_id = st.selectbox("Select Active Online Patient / Session ID", active_ids)
+        
+        col_mon1, col_mon2 = st.columns([1, 1])
+        
+        with col_mon1:
+            st.markdown(f"### 🎙️ Live Transcript for: `{selected_live_id}`")
+            live_rows = get_live_transcripts(selected_live_id)
+            if live_rows:
+                transcript_box = ""
+                for speaker, text, timestamp in live_rows:
+                    color = "#58a6ff" if speaker == "Agent" else "#3fb950"
+                    transcript_box += f"<b style='color: {color};'>[{speaker}] ({timestamp}):</b> {text}<br>"
                 st.markdown(f"""
-                <div style="background-color: #161b22; padding: 15px; border-radius: 10px; border-left: 5px solid {border_color}; margin-bottom: 10px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <strong style="color: #f0f6fc; font-size: 1.1em;">Patient ID: {p_id}</strong>
-                        <span style="background: {border_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold;">{risk_badge}</span>
+                    <div style="background-color: #161b22; padding: 15px; border-radius: 10px; border: 1px solid #30363d; height: 300px; overflow-y: auto;">
+                        {transcript_box}
                     </div>
-                    <p style="color: #8b949e; margin: 8px 0 4px 0;"><b>Symptoms:</b> {symptoms_str} &nbsp;|&nbsp; <b>ICD-10:</b> <code style="color: #58a6ff;">{icd10}</code></p>
-                    <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Vocal Stress:</b> <span style="color: #ffa726;">{vocal}</span></p>
-                </div>
                 """, unsafe_allow_html=True)
+            else:
+                st.info("Waiting for speech utterance...")
+                
+        with col_mon2:
+            st.markdown(f"### 🎛️ Doctor Actions for Active Call: `{selected_live_id}`")
+            
+            with st.form("ai_message_form"):
+                st.markdown("**1. Communicate Message via AI Voice**")
+                doctor_message = st.text_area("Message for AI to Speak Out Loud", placeholder="e.g., Ask if they are experiencing dizziness.")
+                submit_ai_msg = st.form_submit_button("🗣️ Make AI Speak to Patient")
+                
+                if submit_ai_msg:
+                    if doctor_message:
+                        add_doctor_whisper(selected_live_id, doctor_message)
+                        st.success(f"Message queued! The AI will voice this to Patient {selected_live_id} immediately.")
+                    else:
+                        st.warning("Please enter a message.")
+                        
+            st.divider()
+            
+            with st.form("bridge_form"):
+                st.markdown("**2. Take Over / Bridge Live Call**")
+                clinical_note = st.text_area("Physician Note", placeholder="e.g., Doctor taking over call directly.")
+                submit_bridge = st.form_submit_button("🚨 Join / Bridge Live Call")
+                
+                if submit_bridge:
+                    if clinical_note:
+                        bridge_physician_call(selected_live_id, clinical_note)
+                        st.success(f"Successfully bridged physician to active call {selected_live_id}!")
+                    else:
+                        st.warning("Please provide a physician note.")
 
 with tab_orders:
-    st.subheader("💊 Autonomous E-Prescriptions & Lab Requisition Orders")
-    st.markdown("Generated instantly upon voice intake completion based on patient ICD-10 codes and uploaded clinical protocols.")
+    st.subheader("💊 Lab Requisition & E-Prescription Approvals")
     if orders_df.empty:
-        st.info("No clinical orders generated yet. Complete a voice triage call to see automated e-prescriptions and lab orders!")
+        st.info("No clinical orders generated yet.")
     else:
-        st.dataframe(orders_df, use_container_width=True, hide_index=True)
+        for idx, row in orders_df.iterrows():
+            o_id = row['id']
+            p_id = row['patient_id']
+            o_type = row['order_type']
+            details = row['order_details']
+            status = row['status']
+            
+            col_o1, col_o2, col_o3 = st.columns([3, 2, 1])
+            with col_o1:
+                st.markdown(f"**Patient:** `{p_id}` | **Type:** {o_type}")
+                st.text(details)
+            with col_o2:
+                st.markdown(f"**Status:** `{status}`")
+            with col_o3:
+                if "Pending" in status:
+                    if st.button("✅ Approve Lab / Rx", key=f"app_{o_id}"):
+                        approve_clinical_order(o_id)
+                        st.success("Approved & Dispatched!")
+                        st.rerun()
+                else:
+                    st.markdown("✔️ **Approved**")
+            st.divider()
 
 with tab_audit:
-    st.subheader("🎙️ Clinical Handoff Reports, FHIR Export & Verbatim Audits")
+    st.subheader("🎙️ Clinical Handoff Reports & FHIR Export")
     if df.empty:
         st.info("No audit records available.")
     else:
@@ -223,53 +336,7 @@ with tab_audit:
             p_id = row['id']
             transcript = row.get('transcript', 'No transcript recorded.')
             icd10 = row.get('icd10_code', 'N/A')
-            vocal = row.get('vocal_stress', 'Normal')
-            pain = row['pain']
-            try:
-                symptoms_str = ", ".join(json.loads(row['symptoms']))
-            except:
-                symptoms_str = row['symptoms']
-                
-            with st.expander(f"📁 Session Handoff & Audit ID: {p_id}"):
-                col_rep1, col_rep2 = st.columns(2)
-                
-                with col_rep1:
-                    st.markdown("**📄 Official Clinical Handover Sheet:**")
-                    report_text = f"""--- MEDITRIAGE CLINICAL HANDOFF REPORT ---
-Patient ID: {p_id}
-Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
-Primary Symptoms: {symptoms_str}
-Pain Level: {pain}/10
-ICD-10 Code: {icd10}
-Vocal Biomarker Stress: {vocal}
-
-SOAP NOTE:
-- S (Subjective): Patient reports {symptoms_str}. Pain rated at {pain}/10.
-- O (Objective): Voice intake processed via AssemblyAI Real-Time Voice Gateway. Vocal stress index evaluated as {vocal}.
-- A (Assessment): Patient prioritized under clinical guidelines. ICD-10 assigned: {icd10}.
-- P (Plan): Routine or emergency routing synchronized with EHR database.
---------------------------------------------"""
-                    st.download_button(
-                        label="📥 Download Clinical Report (TXT)",
-                        data=report_text,
-                        file_name=f"meditriage_report_{p_id}.txt",
-                        mime="text/plain",
-                        key=f"rep_{p_id}"
-                    )
-                    
-                with col_rep2:
-                    st.markdown("**🌐 SMART on FHIR Interoperability JSON:**")
-                    fhir_json = json.dumps(generate_fhir_resource(p_id), indent=2)
-                    st.download_button(
-                        label="📥 Export FHIR Bundle (JSON)",
-                        data=fhir_json,
-                        file_name=f"fhir_patient_{p_id}.json",
-                        mime="application/json",
-                        key=f"fhir_{p_id}"
-                    )
-                    
-                st.divider()
-                st.markdown("**🔍 Verbatim Audio Audit Transcript:**")
+            with st.expander(f"📁 Session Audit ID: {p_id} (ICD-10: {icd10})"):
                 st.code(transcript, language="text")
 
 with tab_sms:
@@ -286,7 +353,7 @@ with tab_analytics:
         code_counts.columns = ['ICD-10 Code', 'Count']
         st.dataframe(code_counts, use_container_width=True, hide_index=True)
     else:
-        st.write("Awaiting live intake telemetry...")
+        st.write("Awaiting live telemetry...")
 
 if auto_refresh:
     time.sleep(2)
