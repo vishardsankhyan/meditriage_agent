@@ -19,11 +19,16 @@ You must start the conversation by saying EXACTLY: "Hello, this is the MediTriag
 Your goal is to collect a 9-digit alphanumeric patient ID, their primary symptoms, and their pain level (1-10).
 Do not provide medical diagnoses.
 
+MULTILINGUAL & HINGLISH ADAPTATION RULES:
+1. LANGUAGE MIRRORING: Detect the language or dialect used by the patient (English or Hinglish / Hindi code-switching). 
+2. If the patient speaks Hinglish (e.g., "mujhe leg mein pain ho raha hai", "sar dard hai", "bahut critical hai"), gracefully respond and converse back in natural, empathetic Hinglish (e.g., "Main samajh sakta hoon, aapko kitni takleef hai...").
+3. INTERNAL STANDARDIZATION: While conversing in the user's preferred language, ensure that all extracted symptoms passed into backend tools (`update_patient_record`, `escalate_to_human`) are translated and logged in professional medical English for hospital records.
+
 MANDATORY WORKFLOW & RULES:
-1. As soon as the patient provides their 9-digit ID, immediately execute the `lookup_patient_history` tool. If they are a returning patient, greet them warmly referencing their past history.
-2. Collect their primary symptoms and pain level (1-10).
-3. MANDATORY TOOL EXECUTION: As soon as you receive the pain level from the patient, you MUST immediately invoke either the `update_patient_record` or `escalate_to_human` tool call. Do not chat further or ask conversational questions after the pain level is given. Fire the tool instantly!
-4. If pain level is 9-10 or severe/unbearable red-flag symptoms are mentioned (like severe headaches, chest pain, breathing trouble), immediately execute `escalate_to_human`.
+1. As soon as the patient provides their 9-digit ID, immediately execute the `lookup_patient_history` tool. If returning, greet them warmly referencing past history in their preferred language.
+2. If the patient describes complex symptoms, consult uploaded clinic protocols using `consult_knowledge_base`.
+3. MANDATORY TOOL EXECUTION: As soon as you receive the pain level, immediately invoke `update_patient_record` or `escalate_to_human`. Do not chat further after pain level is given.
+4. If pain level is 9-10 or severe/unbearable red-flag symptoms are mentioned, immediately execute `escalate_to_human`.
 """
 
 GREETING_TEXT = "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient ID, and describe the medical symptoms you are experiencing today."
@@ -75,7 +80,7 @@ async def run_agent():
                     {
                         "type": "function",
                         "name": "escalate_to_human",
-                        "description": "Transfer the call to a live nurse for severe pain or critical emergencies.",
+                        "description": "Transfer the call to live nurse for severe pain or critical emergencies.",
                         "parameters": EscalateToHuman.model_json_schema()
                     }
                 ]
@@ -84,7 +89,7 @@ async def run_agent():
         await ws.send(json.dumps(session_config))
         
         print("\n" + "="*50)
-        print("🚀 MediTriage Agent Connected (Strict Tool-Enforcement Active)")
+        print("🚀 MediTriage Agent Connected (Multilingual Hinglish Suite Active)")
         print("="*50)
 
         async def send_audio():
@@ -157,9 +162,6 @@ async def run_agent():
                         print("\n[🚨 SAFETY SUPERVISOR]: Emergency routing and full transcript audit confirmed.")
 
         await asyncio.gather(send_audio(), receive_events())
-
-if __name__ ==0:
-    pass
 
 if __name__ == "__main__":
     try:
