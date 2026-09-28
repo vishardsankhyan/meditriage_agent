@@ -6,6 +6,7 @@ import json
 import time
 from db import init_db, generate_fhir_resource
 
+# Initialize database and tables on startup
 init_db()
 
 st.set_page_config(
@@ -63,6 +64,15 @@ def load_sms_logs():
     except Exception:
         return pd.DataFrame(columns=["id", "patient_id", "message", "status", "timestamp"])
 
+def load_clinical_orders():
+    try:
+        conn = sqlite3.connect('meditriage.db')
+        df = pd.read_sql_query("SELECT * FROM clinical_orders ORDER BY timestamp DESC", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["id", "patient_id", "order_type", "order_details", "status", "timestamp"])
+
 def save_uploaded_document(uploaded_file):
     content = uploaded_file.read().decode("utf-8", errors="ignore")
     conn = sqlite3.connect('meditriage.db')
@@ -82,15 +92,9 @@ def get_uploaded_documents():
     except Exception:
         return []
 
-def update_case_status(patient_id, new_escalated_status):
-    conn = sqlite3.connect('meditriage.db')
-    cursor = conn.cursor()
-    cursor.execute("UPDATE patients SET escalated = ? WHERE id = ?", (new_escalated_status, patient_id))
-    conn.commit()
-    conn.close()
-
 df = load_data()
 sms_df = load_sms_logs()
+orders_df = load_clinical_orders()
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/hospital-3.png", width=50)
@@ -115,14 +119,14 @@ with st.sidebar:
     st.markdown("🟢 **Voice Gateway:** Connected")
     st.markdown("🧠 **Longitudinal Memory:** Active")
     st.markdown("🤖 **Safety Supervisor:** Online")
-    st.markdown("🎙️ **Vocal Biomarkers:** Active")
+    st.markdown("💊 **E-Prescribe Engine:** Active")
     st.markdown("🌐 **SMART on FHIR:** Ready")
     st.divider()
     
     auto_refresh = st.checkbox("🔄 Live Auto-Refresh (2s)", value=True)
 
 st.title("🏥 MediTriage Enterprise Clinical Command Center")
-st.markdown("Autonomous voice intake, vocal biomarker stress analysis, SMART on FHIR export, and clinical handover reports.")
+st.markdown("Autonomous voice intake, automated e-Prescriptions, lab requisition orders, vocal biomarkers, and SMART on FHIR export.")
 
 active_emergencies = len(df[df['escalated'] == 1]) if not df.empty and 'escalated' in df else 0
 if active_emergencies > 0:
@@ -151,15 +155,17 @@ with col4:
 
 st.divider()
 
-tab_queue, tab_audit, tab_sms, tab_analytics = st.tabs([
+# TAB DEFINITION WITH E-PRESCRIBE TAB INCLUDED
+tab_queue, tab_orders, tab_audit, tab_sms, tab_analytics = st.tabs([
     "📋 Active Triage Queue", 
-    "🎙️ Call Audit & Clinical Reports", 
-    "📱 Twilio SMS Dispatch Log", 
+    "💊 E-Prescriptions & Lab Orders", 
+    "🎙️ Call Audit & Reports", 
+    "📱 Twilio SMS Log", 
     "📊 ICD-10 & Analytics"
 ])
 
 with tab_queue:
-    st.subheader("Active Patient Intake Queue, Vocal Biomarkers & Safety Audits")
+    st.subheader("Active Patient Intake Queue & Safety Audits")
     if df.empty:
         st.info("No patient records found. Run `python agent.py` to initiate a live voice triage call!")
     else:
@@ -199,6 +205,14 @@ with tab_queue:
                     <p style="color: #8b949e; margin: 0;"><b>Pain:</b> {pain}/10 &nbsp;|&nbsp; <b>Vocal Stress:</b> <span style="color: #ffa726;">{vocal}</span></p>
                 </div>
                 """, unsafe_allow_html=True)
+
+with tab_orders:
+    st.subheader("💊 Autonomous E-Prescriptions & Lab Requisition Orders")
+    st.markdown("Generated instantly upon voice intake completion based on patient ICD-10 codes and uploaded clinical protocols.")
+    if orders_df.empty:
+        st.info("No clinical orders generated yet. Complete a voice triage call to see automated e-prescriptions and lab orders!")
+    else:
+        st.dataframe(orders_df, use_container_width=True, hide_index=True)
 
 with tab_audit:
     st.subheader("🎙️ Clinical Handoff Reports, FHIR Export & Verbatim Audits")
