@@ -7,9 +7,35 @@ def init_db():
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
     
+    # 1. MASTER PATIENT PROFILE TABLE (Static Demographics)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS patients (
             id TEXT PRIMARY KEY,
+            name TEXT,
+            age INTEGER,
+            sex TEXT,
+            phone TEXT,
+            email TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Bulletproof schema check: inspect existing columns on disk and add any missing ones
+    cursor.execute("PRAGMA table_info(patients);")
+    existing_columns = [row[1] for row in cursor.fetchall()]
+    
+    for col, col_type in [("name", "TEXT"), ("age", "INTEGER"), ("sex", "TEXT"), ("phone", "TEXT"), ("email", "TEXT")]:
+        if col not in existing_columns:
+            try:
+                cursor.execute(f"ALTER TABLE patients ADD COLUMN {col} {col_type};")
+            except sqlite3.OperationalError:
+                pass
+
+    # 2. TRANSACTIONAL CLINICAL ENCOUNTERS TABLE (Dynamic Telephony / Walk-in Visits)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS clinical_encounters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
             symptoms TEXT,
             pain INTEGER,
             urgent INTEGER,
@@ -17,7 +43,9 @@ def init_db():
             icd10_code TEXT,
             safety_status TEXT,
             vocal_stress TEXT,
-            transcript TEXT
+            transcript TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (uid) REFERENCES patients(id)
         )
     ''')
     
@@ -89,14 +117,47 @@ def init_db():
         )
     ''')
     
-    for col, col_type in [("transcript", "TEXT"), ("icd10_code", "TEXT"), ("safety_status", "TEXT"), ("vocal_stress", "TEXT")]:
-        try:
-            cursor.execute(f"ALTER TABLE patients ADD COLUMN {col} {col_type};")
-        except sqlite3.OperationalError:
-            pass
-            
     conn.commit()
     conn.close()
+
+def register_patient_profile(p_id, name, age, sex, phone, email):
+    clean_id = p_id.strip()
+    if not clean_id.isalnum() or len(clean_id) != 9:
+        return {"status": "error", "message": "Validation Error: Patient UID must be exactly 9 alphanumeric digits."}
+        
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO patients (id, name, age, sex, phone, email)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name,
+            age=excluded.age,
+            sex=excluded.sex,
+            phone=excluded.phone,
+            email=excluded.email;
+    ''', (clean_id, name, age, sex, phone, email))
+    
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": f"Patient profile {name} ({clean_id}) registered successfully."}
+
+def write_custom_prescription(patient_id, rx_details, doctor_notes):
+    conn = sqlite3.connect('meditriage.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO clinical_orders (patient_id, order_type, order_details, status) VALUES (?, ?, ?, ?)",
+                   (patient_id, "Custom E-Prescription (Doctor Auth)", f"{rx_details} | Notes: {doctor_notes}", "APPROVED & DISPATCHED (EHR)"))
+    
+    cursor.execute("SELECT email, name FROM patients WHERE id = ?", (patient_id,))
+    row = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    if row and row[0]:
+        email, name = row[0], row[1]
+        log_sms_dispatch(patient_id, f"📧 EMAIL DISPATCHED to {email}: Official prescription for {name}: {rx_details}")
+        return {"status": "success", "message": f"Prescription saved and successfully emailed to {email}!"}
+    return {"status": "success", "message": "Prescription saved and dispatched to EHR (No email on file)."}
 
 def register_active_session(patient_id):
     conn = sqlite3.connect('meditriage.db')
@@ -141,7 +202,7 @@ def get_live_transcripts(patient_id):
 def get_patient_history(patient_id):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT symptoms, pain, escalated, transcript, icd10_code, vocal_stress FROM patients WHERE id = ?", (patient_id,))
+    cursor.execute("SELECT symptoms, pain, escalated, transcript, icd10_code, vocal_stress FROM clinical_encounters WHERE uid = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -154,14 +215,17 @@ def get_patient_history(patient_id):
             "icd10_code": row[4],
             "vocal_stress": row[5]
         }
-    return {"found": False, "message": "No previous records found for this patient ID."}
+    return {"found": False, "message": "No previous clinical encounters found for this patient UID."}
 
 def get_patient_dossier(patient_id):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
     
-    cursor.execute("SELECT symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM patients WHERE id = ?", (patient_id,))
-    patient_row = cursor.fetchone()
+    cursor.execute("SELECT name, age, sex, phone, email FROM patients WHERE id = ?", (patient_id,))
+    profile_row = cursor.fetchone()
+    
+    cursor.execute("SELECT symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM clinical_encounters WHERE uid = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
+    encounter_row = cursor.fetchone()
     
     cursor.execute("SELECT id, order_type, order_details, status, timestamp FROM clinical_orders WHERE patient_id = ?", (patient_id,))
     orders = cursor.fetchall()
@@ -174,29 +238,48 @@ def get_patient_dossier(patient_id):
     
     conn.close()
     
-    if not patient_row:
+    if not profile_row and not encounter_row:
         return None
+        
+    name = profile_row[0] if profile_row and profile_row[0] else "Unregistered Walk-in"
+    age = profile_row[1] if profile_row and profile_row[1] is not None else "N/A"
+    sex = profile_row[2] if profile_row and profile_row[2] else "Unspecified"
+    phone = profile_row[3] if profile_row and profile_row[3] else "N/A"
+    email = profile_row[4] if profile_row and profile_row[4] else "N/A"
+    
+    symptoms = encounter_row[0] if encounter_row else '[]'
+    pain = encounter_row[1] if encounter_row else 0
+    urgent = encounter_row[2] if encounter_row else 0
+    escalated = encounter_row[3] if encounter_row else 0
+    icd10_code = encounter_row[4] if encounter_row else "R69 (Illness, unspecified)"
+    safety_status = encounter_row[5] if encounter_row else "PENDING"
+    vocal_stress = encounter_row[6] if encounter_row else "🟢 Routine"
+    transcript = encounter_row[7] if encounter_row else "No transcript recorded."
         
     return {
         "patient_id": patient_id,
-        "symptoms": patient_row[0],
-        "pain": patient_row[1],
-        "urgent": patient_row[2],
-        "escalated": patient_row[3],
-        "icd10_code": patient_row[4],
-        "safety_status": patient_row[5],
-        "vocal_stress": patient_row[6],
-        "transcript": patient_row[7],
+        "name": name,
+        "age": age,
+        "sex": sex,
+        "phone": phone,
+        "email": email,
+        "symptoms": symptoms,
+        "pain": pain,
+        "urgent": urgent,
+        "escalated": escalated,
+        "icd10_code": icd10_code,
+        "safety_status": safety_status,
+        "vocal_stress": vocal_stress,
+        "transcript": transcript,
         "orders": orders,
         "sms": sms,
         "actions": actions
     }
 
 def resolve_patient_escalation(patient_id):
-    """Marks a critical patient emergency as addressed/resolved by a clinician"""
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    cursor.execute("UPDATE patients SET escalated = 0, urgent = 0 WHERE id = ?", (patient_id,))
+    cursor.execute("UPDATE clinical_encounters SET escalated = 0, urgent = 0 WHERE uid = ?", (patient_id,))
     cursor.execute("INSERT INTO doctor_actions (patient_id, action_type, clinical_note, status) VALUES (?, ?, ?, ?)",
                    (patient_id, "EMERGENCY_RESOLVED", "Clinician reviewed and marked critical issue as addressed.", "RESOLVED"))
     conn.commit()
@@ -268,7 +351,7 @@ def map_icd10(symptoms_list):
 def generate_automated_orders(patient_id, symptoms_list, icd10_code):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM clinical_orders WHERE patient_id = ?", (patient_id,))
+    cursor.execute("DELETE FROM clinical_orders WHERE patient_id = ? AND order_type != 'Custom E-Prescription (Doctor Auth)'", (patient_id,))
     text = " ".join(symptoms_list).lower()
     
     if "cut" in text or "bleeding" in text:
@@ -281,11 +364,6 @@ def generate_automated_orders(patient_id, symptoms_list, icd10_code):
                        (patient_id, "Lab Requisition", "Urgent Brain MRI with Contrast & Neurological Panel", "Pending Physician Sign-off"))
         cursor.execute("INSERT INTO clinical_orders (patient_id, order_type, order_details, status) VALUES (?, ?, ?, ?)",
                        (patient_id, "E-Prescription", "Sumatriptan 50mg - Take at onset of migraine", "Pending Physician Sign-off"))
-    elif "shoulder" in text or "joint" in text or "knee" in text:
-        cursor.execute("INSERT INTO clinical_orders (patient_id, order_type, order_details, status) VALUES (?, ?, ?, ?)",
-                       (patient_id, "Lab Requisition", "Orthopedic Imaging / MRI Joint Requisition", "Pending Physician Sign-off"))
-        cursor.execute("INSERT INTO clinical_orders (patient_id, order_type, order_details, status) VALUES (?, ?, ?, ?)",
-                       (patient_id, "E-Prescription", "Ibuprofen 600mg - Take 1 tablet every 8 hours with food for inflammation", "Pending Physician Sign-off"))
     else:
         cursor.execute("INSERT INTO clinical_orders (patient_id, order_type, order_details, status) VALUES (?, ?, ?, ?)",
                        (patient_id, "E-Prescription", "Standard Outpatient Care & Hydration Protocol", "Pending Physician Sign-off"))
@@ -345,8 +423,12 @@ def update_patient_record(data, transcript_summary="Patient completed secure voi
         
     icd10 = map_icd10(symptoms_list)
     
+    cursor.execute("SELECT id FROM patients WHERE id = ?", (p_id,))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO patients (id, name, age, sex, phone, email) VALUES (?, 'Walk-in Patient', 30, 'Unspecified', '000-000-0000', 'patient@meditriage.io')", (p_id,))
+        
     cursor.execute('''
-        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
+        INSERT INTO clinical_encounters (uid, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (p_id, json.dumps(symptoms_list), pain, urgent, escalated, icd10, safety_audit, vocal_stress, transcript_summary))
     
@@ -357,7 +439,7 @@ def update_patient_record(data, transcript_summary="Patient completed secure voi
     log_sms_dispatch(p_id, f"MediTriage Notice: Patient {p_id} intake logged. Risk Tier: {'CRITICAL' if escalated else 'Routine'}.")
     close_active_session(p_id)
     
-    return {"status": "success", "message": "EHR record complete.", "safety_audit": safety_audit}
+    return {"status": "success", "message": "Clinical encounter logged.", "safety_audit": safety_audit}
 
 def escalate_to_human(arguments, transcript_summary="Emergency escalation triggered."):
     p_id = arguments.get("patient_id", "UNKNOWN")
@@ -369,10 +451,15 @@ def escalate_to_human(arguments, transcript_summary="Emergency escalation trigge
     
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
+    cursor.execute("SELECT id FROM patients WHERE id = ?", (p_id,))
+    if not cursor.fetchone():
+        cursor.execute("INSERT INTO patients (id, name, age, sex, phone, email) VALUES (?, 'Emergency Patient', 35, 'Unspecified', '000-000-0000', 'emergency@meditriage.io')", (p_id,))
+        
     cursor.execute('''
-        INSERT OR REPLACE INTO patients (id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (p_id, json.dumps([reason]), 10, 1, 1, icd10, "FLAGGED: Immediate Emergency Override", vocal_stress, transcript_summary))
+        INSERT INTO clinical_encounters (uid, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript)
+        VALUES (?, ?, 10, 1, 1, ?, 'FLAGGED: Immediate Emergency Override', ?, ?)
+    ''', (p_id, json.dumps([reason]), icd10, vocal_stress, transcript_summary))
+    
     conn.commit()
     conn.close()
     
@@ -385,17 +472,19 @@ def escalate_to_human(arguments, transcript_summary="Emergency escalation trigge
 def generate_fhir_resource(patient_id):
     conn = sqlite3.connect('meditriage.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT id, symptoms, pain, urgent, escalated, icd10_code, safety_status, vocal_stress, transcript FROM patients WHERE id = ?", (patient_id,))
-    row = cursor.fetchone()
+    cursor.execute("SELECT id, name FROM patients WHERE id = ?", (patient_id,))
+    pat = cursor.fetchone()
+    cursor.execute("SELECT symptoms FROM clinical_encounters WHERE uid = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
+    enc = cursor.fetchone()
     conn.close()
-    if not row:
+    if not pat:
         return {"error": "Patient not found"}
     return {
         "resourceType": "Bundle",
         "type": "collection",
         "entry": [
-            {"resource": {"resourceType": "Patient", "id": row[0]}},
-            {"resource": {"resourceType": "Encounter", "status": "finished", "subject": {"reference": f"Patient/{row[0]}"}, "reasonCode": [{"text": row[1]}]}}
+            {"resource": {"resourceType": "Patient", "id": pat[0], "name": [{"text": pat[1]}]}},
+            {"resource": {"resourceType": "Encounter", "status": "finished", "subject": {"reference": f"Patient/{pat[0]}"}, "reasonCode": [{"text": enc[0] if enc else "N/A"}]}}
         ]
     }
 

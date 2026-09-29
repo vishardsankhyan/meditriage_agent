@@ -14,9 +14,10 @@ from schemas import PatientIntakeData, CheckClinicHours, EscalateToHuman, Lookup
 load_dotenv()
 
 SYSTEM_PROMPT = """You are the receptionist and triage assistant for the MediTriage Medical Clinic. 
-You must start the conversation by saying EXACTLY: "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient ID, and describe the medical symptoms you are experiencing today."
+You must start the conversation by saying EXACTLY: "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient UID, and describe the medical symptoms you are experiencing today."
 
-Your goal is to collect a 9-digit alphanumeric patient ID, their primary symptoms, and their pain level (1-10).
+Your goal is to collect a strict 9-digit alphanumeric patient ID, their primary symptoms, and their pain level (1-10).
+STRICT VALIDATION: If the patient provides a patient ID that is NOT 9 digits long, politely ask them to repeat or verify their exact 9-digit ID before proceeding.
 Do not provide medical diagnoses.
 
 🚨 HIGHEST PRIORITY DOCTOR WHISPER OVERRIDE PROTOCOL:
@@ -24,7 +25,7 @@ Do not provide medical diagnoses.
 2. IF `check_doctor_intercom` returns `"CRITICAL_ALERT": "DOCTOR_WHISPER_INTERRUPTION"`, this overrides everything else! You MUST immediately take the text inside `"EXACT_PHRASE_TO_SPEAK_OUT_LOUD"` and **speak it out loud** to the patient using your voice right now.
 """
 
-GREETING_TEXT = "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient ID, and describe the medical symptoms you are experiencing today."
+GREETING_TEXT = "Hello, this is the MediTriage automated assistant. Please tell me your 9-digit patient UID, and describe the medical symptoms you are experiencing today."
 
 async def run_agent():
     uri = "wss://agents.assemblyai.com/v1/ws"
@@ -38,7 +39,6 @@ async def run_agent():
     speaker = Speaker()
     session_transcript = []
     
-    # Instantly register an active session upon connecting
     current_session_id = f"CALL_{os.urandom(2).hex().upper()}"
     register_active_session(current_session_id)
     active_patient_id = [current_session_id]
@@ -144,7 +144,9 @@ async def run_agent():
                     full_transcript_str = "\n".join(session_transcript)
                     
                     if tool_name == "lookup_patient_history":
-                        p_id = arguments.get("patient_id")
+                        p_id = arguments.get("patient_id", "").strip()
+                        if len(p_id) != 9:
+                            print(f"\n[⚠️ 9-DIGIT VALIDATION WARNING]: Invalid UID length received: '{p_id}' ({len(p_id)} chars)")
                         if p_id:
                             close_active_session(current_session_id)
                             current_session_id = p_id
